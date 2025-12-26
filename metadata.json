@@ -1,0 +1,7 @@
+{
+  "name": "Bíblia Iluminada",
+  "description": "Uma aplicação de estudo bíblico de última geração com insights de IA, devocionais personalizados e leitura imersiva das escrituras.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
