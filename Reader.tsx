@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { BIBLE_BOOKS } from './constants';
 import { ChevronLeft, ChevronRight, Book, List, Search, X, Loader2, Sparkles, RefreshCw, Volume2 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
@@ -29,13 +29,13 @@ const Reader: React.FC<ReaderProps> = ({ onAskAI, voiceGender = 'female' }) => {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState<number | null>(null);
+  
+  // Cache para capítulos: chave é "BookName-ChapterNumber"
+  const [chapterCache, setChapterCache] = useState<Record<string, any[]>>({});
+  
   const containerRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    fetchVerses();
-  }, [currentBook, currentChapter]);
-
-  const translateViaAI = async (englishVerses: any[]) => {
+  const translateViaAI = useCallback(async (englishVerses: any[]) => {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const prompt = `Traduza os seguintes versículos da Bíblia do inglês para o Português (Brasil), mantendo o estilo solene e fiel:
@@ -54,41 +54,88 @@ const Reader: React.FC<ReaderProps> = ({ onAskAI, voiceGender = 'female' }) => {
       console.error("Erro na tradução via IA:", e);
       return englishVerses;
     }
-  };
+  }, []);
+
+  const fetchChapterData = useCallback(async (book: typeof BIBLE_BOOKS[0], chapter: number) => {
+    const bookRef = encodeURIComponent(book.apiName);
+    const url = `https://bible-api.com/${bookRef}+${chapter}?translation=almeida`;
+    
+    try {
+      let response = await fetch(url);
+      if (!response.ok) {
+        const fallbackUrl = `https://bible-api.com/${bookRef}+${chapter}`;
+        const fallbackRes = await fetch(fallbackUrl);
+        if (!fallbackRes.ok) return null;
+        const data = await fallbackRes.json();
+        return await translateViaAI(data.verses);
+      }
+      const data = await response.json();
+      return data.verses;
+    } catch (e) {
+      return null;
+    }
+  }, [translateViaAI]);
+
+  const prefetchNext = useCallback(async (currentBookIndex: number, currentChap: number) => {
+    let nextBook = BIBLE_BOOKS[currentBookIndex];
+    let nextChap = currentChap + 1;
+
+    if (nextChap > nextBook.chapters) {
+      if (currentBookIndex + 1 < BIBLE_BOOKS.length) {
+        nextBook = BIBLE_BOOKS[currentBookIndex + 1];
+        nextChap = 1;
+      } else {
+        return; // Fim da Bíblia
+      }
+    }
+
+    const cacheKey = `${nextBook.name}-${nextChap}`;
+    if (chapterCache[cacheKey]) return;
+
+    const data = await fetchChapterData(nextBook, nextChap);
+    if (data) {
+      setChapterCache(prev => ({ ...prev, [cacheKey]: data }));
+    }
+  }, [chapterCache, fetchChapterData]);
+
+  const loadCurrentChapter = useCallback(async () => {
+    const cacheKey = `${currentBook.name}-${currentChapter}`;
+    
+    if (chapterCache[cacheKey]) {
+      setVerses(chapterCache[cacheKey]);
+      setIsLoading(false);
+      containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+      // Mesmo se carregar do cache, tenta prefetchar o próximo
+      const bookIdx = BIBLE_BOOKS.findIndex(b => b.name === currentBook.name);
+      prefetchNext(bookIdx, currentChapter);
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+    
+    const data = await fetchChapterData(currentBook, currentChapter);
+    if (data) {
+      setVerses(data);
+      setChapterCache(prev => ({ ...prev, [cacheKey]: data }));
+      const bookIdx = BIBLE_BOOKS.findIndex(b => b.name === currentBook.name);
+      prefetchNext(bookIdx, currentChapter);
+    } else {
+      setError("Não conseguimos conectar à biblioteca sagrada.");
+    }
+    setIsLoading(false);
+    containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [currentBook, currentChapter, chapterCache, fetchChapterData, prefetchNext]);
+
+  useEffect(() => {
+    loadCurrentChapter();
+  }, [currentBook, currentChapter]);
 
   const handleSpeak = async (verse: any) => {
     if (isSpeaking === verse.verse) return;
     setIsSpeaking(verse.verse);
     await speakText(verse.text, voiceGender);
     setIsSpeaking(null);
-  };
-
-  const fetchVerses = async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const bookRef = encodeURIComponent(currentBook.apiName);
-      const url = `https://bible-api.com/${bookRef}+${currentChapter}?translation=almeida`;
-      
-      let response = await fetch(url);
-      
-      if (!response.ok) {
-        const fallbackUrl = `https://bible-api.com/${bookRef}+${currentChapter}`;
-        const fallbackResponse = await fetch(fallbackUrl);
-        if (!fallbackResponse.ok) throw new Error("Não foi possível carregar este capítulo.");
-        const data = await fallbackResponse.json();
-        const translatedVerses = await translateViaAI(data.verses);
-        setVerses(translatedVerses);
-      } else {
-        const data = await response.json();
-        setVerses(data.verses);
-      }
-      containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-    } catch (error: any) {
-      setError("Não conseguimos conectar à biblioteca sagrada.");
-    } finally {
-      setIsLoading(false);
-    }
   };
 
   const handleSearch = async (e?: React.FormEvent) => {
@@ -155,7 +202,7 @@ const Reader: React.FC<ReaderProps> = ({ onAskAI, voiceGender = 'female' }) => {
           <div className="flex flex-col items-center justify-center h-full space-y-4 text-center">
             <X size={32} className="text-rose-500" />
             <p className="text-sm text-slate-500">{error}</p>
-            <button onClick={fetchVerses} className="bg-indigo-600 text-white px-6 py-2 rounded-full font-bold shadow-lg">Tentar Novamente</button>
+            <button onClick={loadCurrentChapter} className="bg-indigo-600 text-white px-6 py-2 rounded-full font-bold shadow-lg">Tentar Novamente</button>
           </div>
         ) : (
           <div className="max-w-2xl mx-auto space-y-6">
